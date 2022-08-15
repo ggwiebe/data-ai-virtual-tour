@@ -4,9 +4,6 @@
 # MAGIC # Welcome!  
 # MAGIC <br>
 # MAGIC <img src="https://github.com/PawaritL/data-ai-world-tour-dsml-jan-2022/blob/main/dsml-header.png?raw=true" width="63.5%">
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC # Friendly Neighbourhood Tips  
 # MAGIC 
@@ -40,10 +37,11 @@
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC CREATE DATABASE IF NOT EXISTS churndb;
-# MAGIC DROP TABLE IF EXISTS churndb.demographic;
-# MAGIC DROP TABLE IF EXISTS churndb.service_features;
-# MAGIC DROP TABLE IF EXISTS churndb.demographic_service
+# MAGIC CREATE DATABASE IF NOT EXISTS ggw_churndb;
+# MAGIC USE ggw_churndb;
+# MAGIC DROP TABLE IF EXISTS demographic;
+# MAGIC DROP TABLE IF EXISTS service_features;
+# MAGIC DROP TABLE IF EXISTS demographic_service
 
 # COMMAND ----------
 
@@ -51,28 +49,40 @@
 
 # COMMAND ----------
 
+display(dbutils.fs.ls("/tmp/ML/telco_churn"))
+
+# COMMAND ----------
+
 import pyspark.sql.functions as F
 
-telco_df = spark.read.option("header", True).option("inferSchema", True).csv("/tmp/ML/telco_churn/Telco-Customer-Churn.csv")
+telco_df = spark.read \
+                .format("csv") \
+                .option("header", True) \
+                .option("inferSchema", True) \
+                .load("/tmp/ML/telco_churn/Telco-Customer-Churn.csv")
 
 # 0/1 -> boolean
 telco_df = telco_df.withColumn("SeniorCitizen", F.col("SeniorCitizen") == 1)
 # Yes/No -> boolean
 for yes_no_col in ["Partner", "Dependents", "PhoneService", "PaperlessBilling"]:
   telco_df = telco_df.withColumn(yes_no_col, F.col(yes_no_col) == "Yes")
+
 telco_df = telco_df.withColumn("Churn", F.when(F.col("Churn") == "Yes", 1).otherwise(0))
 
 # Contract categorical -> duration in months
-telco_df = telco_df.withColumn("Contract",\
-    F.when(F.col("Contract") == "Month-to-month", 1).\
-    when(F.col("Contract") == "One year", 12).\
-    when(F.col("Contract") == "Two year", 24))
+telco_df = telco_df.withColumn("Contract", \
+    F.when(F.col("Contract") == "Month-to-month", 1) \
+     .when(F.col("Contract") == "One year", 12) \
+     .when(F.col("Contract") == "Two year", 24))
 # Empty TotalCharges -> NaN
-telco_df = telco_df.withColumn("TotalCharges",\
-    F.when(F.length(F.trim(F.col("TotalCharges"))) == 0, None).\
-    otherwise(F.col("TotalCharges").cast('double')))
+telco_df = telco_df.withColumn("TotalCharges", \
+    F.when(F.length(F.trim(F.col("TotalCharges"))) == 0, None) \
+     .otherwise(F.col("TotalCharges").cast('double')))
 
-telco_df.select("customerID", "gender", "SeniorCitizen", "Partner", "Dependents", "Churn").write.format("delta").saveAsTable("churndb.demographic")
+telco_df.select("customerID", "gender", "SeniorCitizen", "Partner", "Dependents", "Churn") \
+        .write \
+        .format("delta") \
+        .saveAsTable("demographic")
 
 # COMMAND ----------
 
@@ -84,6 +94,7 @@ telco_df.select("customerID", "gender", "SeniorCitizen", "Partner", "Dependents"
 # COMMAND ----------
 
 def compute_service_features(data):
+
   # Count number of optional services enabled, like streaming TV
   @F.pandas_udf('int')
   def num_optional_services(*cols):
@@ -91,11 +102,11 @@ def compute_service_features(data):
   
   # Below also add AvgPriceIncrease: current monthly charges compared to historical average
   service_cols = [c for c in data.columns if c not in ["gender", "SeniorCitizen", "Partner", "Dependents", "Churn"]]
-  return data.select(service_cols).fillna({"TotalCharges": 0.0}).\
-    withColumn("NumOptionalServices",
-        num_optional_services("OnlineSecurity", "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV", "StreamingMovies")).\
-    withColumn("AvgPriceIncrease",
-        F.when(F.col("tenure") > 0, (F.col("MonthlyCharges") - (F.col("TotalCharges") / F.col("tenure")))).otherwise(0.0))
+  return data.select(service_cols).fillna({"TotalCharges": 0.0}) \
+                                  .withColumn("NumOptionalServices",num_optional_services("OnlineSecurity", "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV", "StreamingMovies")) \
+                                  .withColumn("AvgPriceIncrease",
+                                              F.when(F.col("tenure") > 0, (F.col("MonthlyCharges") - (F.col("TotalCharges") / F.col("tenure"))))
+                                               .otherwise(0.0))
 
 service_df = compute_service_features(telco_df)
 
@@ -106,10 +117,10 @@ from databricks.feature_store import FeatureStoreClient
 fs = FeatureStoreClient()
 
 service_features_table = fs.create_table(
-  name='churndb.service_features',
+  name='ggw_churndb.service_features',
   primary_keys='customerID',
   schema=service_df.schema,
-  description='Telco customer services')
+  description='GGW Telco customer services')
 
 # COMMAND ----------
 
@@ -118,7 +129,7 @@ service_features_table = fs.create_table(
 
 # COMMAND ----------
 
-fs.write_table("churndb.service_features", service_df)
+fs.write_table("ggw_churndb.service_features", service_df)
 
 # COMMAND ----------
 
@@ -129,6 +140,10 @@ fs.write_table("churndb.service_features", service_df)
 # MAGIC - a feature table in the Feature Store tab called `churndb.service_features` with customer service-related info -- try it!
 # MAGIC 
 # MAGIC Last, but not least, we'll need the latest `scikit-learn`:
+
+# COMMAND ----------
+
+# MAGIC %pip list scikit-learn
 
 # COMMAND ----------
 
@@ -161,7 +176,7 @@ dbutils.notebook.exit("stop")
 
 # COMMAND ----------
 
-display(spark.read.table("churndb.demographic"))
+display(spark.read.table("ggw_churndb.demographic"))
 
 # COMMAND ----------
 
@@ -170,11 +185,13 @@ display(spark.read.table("churndb.demographic"))
 
 # COMMAND ----------
 
-display(spark.read.table("churndb.demographic").summary())
+demo_df = spark.read.table("ggw_churndb.demographic")
+display(demo_df.summary())
+dbutils.data.summarize(demo_df)
 
 # COMMAND ----------
 
-display(spark.read.table("churndb.demographic")) # check out other Plot Options too
+display(spark.read.table("ggw_churndb.demographic")) # check out other Plot Options too
 
 # COMMAND ----------
 
@@ -229,8 +246,8 @@ from databricks.feature_store import FeatureStoreClient, FeatureLookup
 
 fs = FeatureStoreClient()
 
-training_set = fs.create_training_set(spark.read.table("churndb.demographic"),
-                                      [FeatureLookup(table_name = "churndb.service_features", lookup_key="customerID")],
+training_set = fs.create_training_set(spark.read.table("ggw_churndb.demographic"),
+                                      [FeatureLookup(table_name = "ggw_churndb.service_features", lookup_key="customerID")],
                                       label=None, exclude_columns="customerID")
 
 display(training_set.load_df())
@@ -242,7 +259,9 @@ display(training_set.load_df())
 
 # COMMAND ----------
 
-training_set.load_df().write.format("delta").saveAsTable("churndb.demographic_service")
+training_set.load_df().write  \
+                      .format("delta") \
+                      .saveAsTable("ggw_churndb.demographic_service")
 
 # COMMAND ----------
 
@@ -275,10 +294,10 @@ import shap
 mlflow.autolog(disable=True)
 
 # be sure to change the following run URI to match the best model generated by AutoML
-model_uri = 'runs:/69755aad201e4d48abd021e5d6106126/model'
+model_uri = 'runs:/aa954a30e8b44a7ebe9dc9240a211a3c/model'
 #model_uri = "runs:/[your run ID here!]/model"
 
-sample = spark.read.table("churndb.demographic_service").sample(0.05, seed=42).toPandas()
+sample = spark.read.table("ggw_churndb.demographic_service").sample(0.05, seed=42).toPandas()
 data = sample.drop(["Churn"], axis=1)
 labels = sample["Churn"]
 X_background, X_example, _, y_example = train_test_split(data, labels, train_size=0.25, random_state=42, stratify=labels)
@@ -348,8 +367,8 @@ from databricks.feature_store import FeatureStoreClient, FeatureLookup
 
 fs = FeatureStoreClient()
 
-training_set = fs.create_training_set(spark.read.table("churndb.demographic"),
-                                      [FeatureLookup(table_name="churndb.service_features", lookup_key="customerID")],
+training_set = fs.create_training_set(spark.read.table("ggw_churndb.demographic"),
+                                      [FeatureLookup(table_name="ggw_churndb.service_features", lookup_key="customerID")],
                                       label="Churn", exclude_columns="customerID")
 df_loaded = training_set.load_df().toPandas()
 
@@ -468,8 +487,8 @@ from mlflow.models.signature import infer_signature
 mlflow.autolog(log_input_examples=True)
 
 with mlflow.start_run() as run:
-    training_set = fs.create_training_set(spark.read.table("churndb.demographic"),
-                                          [FeatureLookup(table_name="churndb.service_features",
+    training_set = fs.create_training_set(spark.read.table("ggw_churndb.demographic"),
+                                          [FeatureLookup(table_name="ggw_churndb.service_features",
                                                          lookup_key="customerID")],
                                           label="Churn", exclude_columns="customerID")
     df_loaded = training_set.load_df().toPandas()
@@ -484,7 +503,7 @@ with mlflow.start_run() as run:
             "model",
             flavor=mlflow.sklearn,
             training_set=training_set,
-            registered_model_name="churn",
+            registered_model_name="ggw_churn",
             input_example=split_X[:100],
             signature=infer_signature(split_X, split_y))
 
