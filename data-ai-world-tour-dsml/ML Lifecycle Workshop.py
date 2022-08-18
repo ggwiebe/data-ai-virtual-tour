@@ -3,8 +3,8 @@
 # MAGIC 
 # MAGIC # Welcome!  
 # MAGIC <br>
-# MAGIC <img src="https://github.com/PawaritL/data-ai-world-tour-dsml-jan-2022/blob/main/dsml-header.png?raw=true" width="63.5%">
-# MAGIC %md
+# MAGIC <img src="https://github.com/PawaritL/data-ai-world-tour-dsml-jan-2022/blob/main/dsml-header.png?raw=true" width="63.5%">  
+# MAGIC   
 # MAGIC # Friendly Neighbourhood Tips  
 # MAGIC 
 # MAGIC To run a cell: press **Shift + Enter**  
@@ -17,6 +17,7 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,The Data Engineer would do this work for us. Right? They're helpful like that. Right?
 # MAGIC %md
 # MAGIC # Setup
 # MAGIC 
@@ -45,44 +46,68 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Python notebook, but look at the other cell commands you can run! (e.g. shell, markdown, scala, R, SQL, etc.)
 # MAGIC %sh mkdir -p /dbfs/tmp/ML/telco_churn/; wget -O /dbfs/tmp/ML/telco_churn/Telco-Customer-Churn.csv https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/master/data/Telco-Customer-Churn.csv
 
 # COMMAND ----------
 
+# DBTITLE 1,Get friendly with dbutils AND display - one is super helpful (dbutils) and the other is super friendly (display)!
 display(dbutils.fs.ls("/tmp/ML/telco_churn"))
+
+# COMMAND ----------
+
+# MAGIC %md ## Basic Data Standardization  
+# MAGIC   
+# MAGIC Change types and move from categorical strings to numbers or booleans
+
+# COMMAND ----------
+
+# Read Source file
+telco_df = (spark.read 
+                 .format("csv")
+                 .option("header", True)
+                 .option("inferSchema", True)
+                 .load("/tmp/ML/telco_churn/Telco-Customer-Churn.csv")
+           )
+
+display(telco_df)
 
 # COMMAND ----------
 
 import pyspark.sql.functions as F
 
-telco_df = spark.read \
-                .format("csv") \
-                .option("header", True) \
-                .option("inferSchema", True) \
-                .load("/tmp/ML/telco_churn/Telco-Customer-Churn.csv")
+# Standardize datatypes (e.g. numbers or strings to booleans, etc.)
 
 # 0/1 -> boolean
 telco_df = telco_df.withColumn("SeniorCitizen", F.col("SeniorCitizen") == 1)
+
 # Yes/No -> boolean
 for yes_no_col in ["Partner", "Dependents", "PhoneService", "PaperlessBilling"]:
   telco_df = telco_df.withColumn(yes_no_col, F.col(yes_no_col) == "Yes")
 
+# Churn -> 0/1 
 telco_df = telco_df.withColumn("Churn", F.when(F.col("Churn") == "Yes", 1).otherwise(0))
 
 # Contract categorical -> duration in months
-telco_df = telco_df.withColumn("Contract", \
-    F.when(F.col("Contract") == "Month-to-month", 1) \
-     .when(F.col("Contract") == "One year", 12) \
-     .when(F.col("Contract") == "Two year", 24))
-# Empty TotalCharges -> NaN
-telco_df = telco_df.withColumn("TotalCharges", \
-    F.when(F.length(F.trim(F.col("TotalCharges"))) == 0, None) \
-     .otherwise(F.col("TotalCharges").cast('double')))
+telco_df = (telco_df.withColumn("Contract",
+                      F.when(F.col("Contract") == "Month-to-month", 1)
+                       .when(F.col("Contract") == "One year", 12)
+                       .when(F.col("Contract") == "Two year", 24))
+           )
 
-telco_df.select("customerID", "gender", "SeniorCitizen", "Partner", "Dependents", "Churn") \
-        .write \
-        .format("delta") \
-        .saveAsTable("demographic")
+# Empty TotalCharges -> NaN
+telco_df = (telco_df.withColumn("TotalCharges",
+                      F.when(F.length(F.trim(F.col("TotalCharges"))) == 0, None)
+                       .otherwise(F.col("TotalCharges").cast('double')))
+           )
+
+# Save resulting standardized Dataframe as a Table
+(telco_df.select("customerID", "gender", "SeniorCitizen", "Partner", "Dependents", "Churn")
+         .write
+         .format("delta")
+         .mode("overwrite")
+         .saveAsTable("demographic")
+)
 
 # COMMAND ----------
 
@@ -102,12 +127,14 @@ def compute_service_features(data):
   
   # Below also add AvgPriceIncrease: current monthly charges compared to historical average
   service_cols = [c for c in data.columns if c not in ["gender", "SeniorCitizen", "Partner", "Dependents", "Churn"]]
-  return data.select(service_cols).fillna({"TotalCharges": 0.0}) \
-                                  .withColumn("NumOptionalServices",num_optional_services("OnlineSecurity", "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV", "StreamingMovies")) \
-                                  .withColumn("AvgPriceIncrease",
-                                              F.when(F.col("tenure") > 0, (F.col("MonthlyCharges") - (F.col("TotalCharges") / F.col("tenure"))))
-                                               .otherwise(0.0))
+  return (data.select(service_cols)
+              .fillna({"TotalCharges": 0.0})
+              .withColumn("NumOptionalServices",num_optional_services("OnlineSecurity", "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV", "StreamingMovies"))
+              .withColumn("AvgPriceIncrease",F.when(F.col("tenure") > 0, (F.col("MonthlyCharges") - (F.col("TotalCharges") / F.col("tenure"))))
+                                              .otherwise(0.0))
+         )
 
+# Compute Service Dataframe based on above
 service_df = compute_service_features(telco_df)
 
 # COMMAND ----------
@@ -129,7 +156,8 @@ service_features_table = fs.create_table(
 
 # COMMAND ----------
 
-fs.write_table("ggw_churndb.service_features", service_df)
+fs.write_table("ggw_churndb.service_features", service_df, "merge") 
+
 
 # COMMAND ----------
 
@@ -161,6 +189,17 @@ dbutils.notebook.exit("stop")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC # Business Problem - Analytics Shows 27% of Customers Leaving Each Month
+# MAGIC   
+# MAGIC <br>
+# MAGIC <img src="https://github.com/ggwiebe/data-ai-virtual-tour/blob/main/data-ai-world-tour-dsml/TelcoChurnDashboard.png?raw=true" width="85%">  
+# MAGIC <br>
+# MAGIC   
+# MAGIC Maybe analytics raises a question: why are so many of our customers leaving each month?
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC # Exploration
 # MAGIC 
 # MAGIC Welcome to Databricks! This session will illustrate a fictional, simple, but representative day in the life of a data scientist on Databricks, who starts with data and ends up with a basic production service.
@@ -169,33 +208,46 @@ dbutils.notebook.exit("stop")
 # MAGIC <img src="https://databricks.com/wp-content/uploads/2020/08/blog-profit-drive-retention-1-min.png" width="38%">
 # MAGIC 
 # MAGIC Imagine the case of a startup telecom company, with customers who unfortunately sometimes choose to terminate their service. It would be useful to predict when a customer might churn, to intervene. Fortunately, the company has been diligent about collecting data about customers, which might be predictive. This is new territory, the first time the company has tackled the problem. Where to start?
-# MAGIC 
-# MAGIC ## Data Exploration
-# MAGIC 
-# MAGIC We can start by simply reading the data and exploring it. There's already some useful information in the `demographic` table: customer ID, whether they have churned (or not, yet), and basic demographic information:
-
-# COMMAND ----------
-
-display(spark.read.table("ggw_churndb.demographic"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Do the normal, predictable things. Compute summary stats. Plot some values. See what's what.
+# MAGIC ## Data Exploration
+# MAGIC 
+# MAGIC We can start by simply reading the data and exploring it. There's already some useful information in the `demographic` table: customer ID, whether they have churned (or not, yet), and basic demographic information:  
+# MAGIC 
+# MAGIC *** ALSO Take advantage of Databricks' built-in "Data Profile" feature to get some "free" EDA with one click!
 
 # COMMAND ----------
 
+# DBTITLE 1,Display does a great job showing dataframe & now has data profiling!!!
 demo_df = spark.read.table("ggw_churndb.demographic")
+display(demo_df)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Do the normal, predictable things. Compute summary stats. Plot some values. See what's what.  
+# MAGIC   
+# MAGIC *** Note the difference between the Dataframe summary() function and the DBUtils summarize feature with built-in visualizations!
+
+# COMMAND ----------
+
+# DBTITLE 1,df.summary & dbutils.data.summarize!!!
+# The two methods here show the difference between the Dataframe summary() function and the DBUtils summarize feature with built-in visualizations!
 display(demo_df.summary())
 dbutils.data.summarize(demo_df)
 
 # COMMAND ----------
 
-display(spark.read.table("ggw_churndb.demographic")) # check out other Plot Options too
+# DBTITLE 1,Display also has a built-in charting capability - soon to be merged with the best of DB SQL's new features!!!
+# display(spark.read.table("ggw_churndb.demographic")) # Let's not re-read the table
+display(demo_df) # check out other Plot Options too
 
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## AutoML for an Accelerated first pass model
 # MAGIC This is easy, but frankly not that informative. Looking deeper would require writing some more code to explore, and, after all we do want to get on to trying out modeling too. Rather than continue, how about a coffee break while the machines do some work?
 # MAGIC <img src="https://github.com/PawaritL/data-ai-world-tour-dsml-jan-2022/blob/main/automl-motivation.png?raw=true" width="69%">  
 # MAGIC 
@@ -207,14 +259,15 @@ display(spark.read.table("ggw_churndb.demographic")) # check out other Plot Opti
 # MAGIC - Choose your cluster for "Compute"
 # MAGIC - Choose "Classification" type
 # MAGIC - Browse to database table `churndb.demographic`
-# MAGIC - Under Advanced Options, **limit to 5 trial runs and 5 minutes**
+# MAGIC - Under Advanced Options, **limit to 5 or 10 minutes**
 # MAGIC - Run!
-# MAGIC - After the 5 runs complete you can stop the experiment
+# MAGIC - After the invested time and associated runs are complete the experiment stops (or you can stop it early)
 # MAGIC 
 # MAGIC You should see the results, logged with MLflow, in the UI.  
 
 # COMMAND ----------
 
+# DBTITLE 1,As data scientist how do we make this better - look for help, like Solution Accelerators! 
 # MAGIC %md
 # MAGIC 
 # MAGIC ## How did the baseline model perform?
@@ -222,7 +275,7 @@ display(spark.read.table("ggw_churndb.demographic")) # check out other Plot Opti
 # MAGIC The model was OK, but, could probably be better with more data.  
 # MAGIC ***Wouldn't it be nice*** if we could enrich our models with other relevant information?  
 # MAGIC [Reference: Databricks Telco Solutions Accelerator](https://databricks.com/blog/2021/02/24/solution-accelerator-telco-customer-churn-predictor.html)  
-# MAGIC <img src="https://databricks.com/wp-content/uploads/2021/02/telco-accel-blog-2-new-1024x538.png" width="50%">  
+# MAGIC <img src="https://databricks.com/wp-content/uploads/2021/02/telco-accel-blog-2-new-1024x538.png" width="67%">  
 # MAGIC **Question is...how can I discover these other datasets?**
 
 # COMMAND ----------
@@ -235,13 +288,14 @@ display(spark.read.table("ggw_churndb.demographic")) # check out other Plot Opti
 # MAGIC This **"services"** dataset was previously used for another customer-related modeling task.  
 # MAGIC The data is therefore available in the **Feature Store** (UI example below).  
 # MAGIC <br>
-# MAGIC <img src="https://databricks.com/wp-content/uploads/2021/05/fs-blog-img-2.png" width="50%">  
+# MAGIC <img src="https://databricks.com/wp-content/uploads/2021/05/fs-blog-img-2.png" width="67%">  
 # MAGIC <br>
 # MAGIC Why not reuse these features and build on top of this great work?  
 # MAGIC Programmatically access the Feature Store to read and join everything in the **`service_features`** feature table.
 
 # COMMAND ----------
 
+# DBTITLE 1,Great, let's use Feature Store to incorporate customer services with demographics
 from databricks.feature_store import FeatureStoreClient, FeatureLookup
 
 fs = FeatureStoreClient()
@@ -261,12 +315,13 @@ display(training_set.load_df())
 
 training_set.load_df().write  \
                       .format("delta") \
+                      .mode("overwrite") \
                       .saveAsTable("ggw_churndb.demographic_service")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Try the above again, this time using the augmented data set in `churndb.demographic_service`.  
+# MAGIC Try the above AutoML model creation again, this time using the augmented data set in `churndb.demographic_service`.  
 # MAGIC This time, let's take a look at the **Data Exploration notebook**, and the **Best Model notebook** before proceeding.  
 # MAGIC <br>
 # MAGIC <img src="https://databricks.com/wp-content/uploads/2021/05/glass-box-approach-to-automl.svg" width="50%">
@@ -294,7 +349,7 @@ import shap
 mlflow.autolog(disable=True)
 
 # be sure to change the following run URI to match the best model generated by AutoML
-model_uri = 'runs:/aa954a30e8b44a7ebe9dc9240a211a3c/model'
+model_uri = 'runs:/054b7a78d46a4649abb93d9f070460e0/model'
 #model_uri = "runs:/[your run ID here!]/model"
 
 sample = spark.read.table("ggw_churndb.demographic_service").sample(0.05, seed=42).toPandas()
@@ -375,10 +430,14 @@ df_loaded = training_set.load_df().toPandas()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC This is the same as the code produced by Auto ML, to define the model:
+# MAGIC This is the same as the code produced by Auto ML, to define the model:  
+# MAGIC   
+# MAGIC Checkout the new MLflow 2.0 Pipelines feature to make this more code more modular and extensible!!!  
+# MAGIC https://www.mlflow.org/docs/latest/pipelines.html
 
 # COMMAND ----------
 
+# DBTITLE 1,This function will be called many times by hyperopt with many parms; Also... CHECKOUT MLflow Pipelines!!!
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -430,7 +489,6 @@ def build_model(params):
             ("classifier", xgbc_classifier),
     ])
 
-
 # COMMAND ----------
 
 from sklearn.model_selection import train_test_split
@@ -474,6 +532,11 @@ best_params = fmin(fn=train_model, space=search_space, algo=tpe.suggest, \
 
 # COMMAND ----------
 
+# DBTITLE 1,These are the best parameters based on our recent hyperopt search on existing data and for XGBOOST - let's check them out!!!
+display(best_params)
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC You should see model runs recorded by MLflow appear in the Experiments sidebar at the right. It fit several models and picked the parameters that worked best, in a brief parameter tuning run as `best_params`.
 # MAGIC 
@@ -481,6 +544,7 @@ best_params = fmin(fn=train_model, space=search_space, algo=tpe.suggest, \
 
 # COMMAND ----------
 
+# DBTITLE 1,AutoML used a persisted table, here we use FeatureStore Client runtime lookup/join, using the best_params from hyperopt above!
 import mlflow
 from mlflow.models.signature import infer_signature
 
@@ -523,12 +587,13 @@ best_run
 
 # COMMAND ----------
 
+# DBTITLE 1,Use the built-in MLflow to get the latest version AND transition via API (versus GUI as before)
 import mlflow.tracking
 
 client = mlflow.tracking.MlflowClient()
 
-model_version = client.get_latest_versions("churn", stages=["None"])[0]
-client.transition_model_version_stage("churn", model_version.version, stage="Staging")
+model_version = client.get_latest_versions("ggw_churn", stages=["None"])[0]
+client.transition_model_version_stage("ggw_churn", model_version.version, stage="Staging")
 
 # COMMAND ----------
 
@@ -546,10 +611,11 @@ dbutils.notebook.exit("stop")
 
 # COMMAND ----------
 
+# DBTITLE 1,This time get the "staging" version of the "Churn" model
 from mlflow.store.artifact.models_artifact_repo import ModelsArtifactRepository
 import os
 
-local_path = ModelsArtifactRepository(f"models:/churn/staging").download_artifacts("")
+local_path = ModelsArtifactRepository(f"models:/ggw_churn/staging").download_artifacts("")
 # if you need to, you can load other artifacts for your testing
 
 # COMMAND ----------
@@ -559,10 +625,12 @@ local_path = ModelsArtifactRepository(f"models:/churn/staging").download_artifac
 
 # COMMAND ----------
 
+# DBTITLE 1,Check the model accuracy, by checking the latest run
 import mlflow.tracking
 
 client = mlflow.tracking.MlflowClient()
-latest_model_detail = client.get_latest_versions("churn", stages=['Staging'])[0]
+latest_model_detail = client.get_latest_versions("ggw_churn", stages=['Staging'])[0]
+
 accuracy = mlflow.get_run(latest_model_detail.run_id).data.metrics['training_accuracy_score']
 print(f"Training accuracy: {accuracy}")
 assert(accuracy >= 0.8)
@@ -581,6 +649,19 @@ client.transition_model_version_stage("churn", latest_model_detail.version, stag
 
 # MAGIC %md
 # MAGIC 
-# MAGIC ### Recap: End-to-end Machine Learning workflow  
+# MAGIC # Model Monitoring  
+# MAGIC   
+# MAGIC Finally, automated testing is great, but we also want to continuously monitor model quality.  
+# MAGIC Databricks has a number of features (including MLflow) to support monitoring the results of our model.  
+# MAGIC Recently Databricks has announced its new Model Monitoring Framework that is now in preview for customer testing.  
+# MAGIC Please reach out to your account team if you interested!  
+# MAGIC <br>
+# MAGIC <img src="https://www.databricks.com/wp-content/uploads/2022/06/db-255-blog-img-4.jpg">
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC 
+# MAGIC # Recap: End-to-end Machine Learning workflow  
 # MAGIC <br>
 # MAGIC <img src="https://databricks.com/wp-content/uploads/2020/06/blog-mlflow-model-1.png">
