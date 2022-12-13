@@ -9,6 +9,21 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Initial Environment Setup  
+# MAGIC   
+
+# COMMAND ----------
+
+dbutils.widgets.text("db_name","churndb")
+
+# COMMAND ----------
+
+db_name = dbutils.widgets.get("db_name")
+print("Setting up and using database: {}".format(db_name))
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Initial Data Table Setup
 # MAGIC 
 # MAGIC This sets up the `demographic` table, which is the initial data set considered by the data scientist. It would have been created by data engineers, in the narrative. The data set is available at https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/master/data/Telco-Customer-Churn.csv
@@ -16,10 +31,18 @@
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC CREATE DATABASE IF NOT EXISTS churndb;
-# MAGIC DROP TABLE IF EXISTS churndb.demographic;
-# MAGIC DROP TABLE IF EXISTS churndb.service_features;
-# MAGIC DROP TABLE IF EXISTS churndb.demographic_service
+# MAGIC CREATE DATABASE IF NOT EXISTS $db_name;
+# MAGIC DROP TABLE IF EXISTS $db_name.demographic;
+# MAGIC DROP TABLE IF EXISTS $db_name.service_features;
+# MAGIC DROP TABLE IF EXISTS $db_name.demographic_service;
+# MAGIC USE $db_name;
+# MAGIC -- SELECT "$db_name";
+# MAGIC 
+# MAGIC SELECT current_catalog(), current_database();
+
+# COMMAND ----------
+
+display(dbutils.fs.ls('/tmp/ML/telco_churn/'))
 
 # COMMAND ----------
 
@@ -27,6 +50,7 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Basic data read; minor data type adjustments (convert to boolean), AND write to database
 import pyspark.sql.functions as F
 
 telco_df = spark.read.option("header", True).option("inferSchema", True).csv("/tmp/ML/telco_churn/Telco-Customer-Churn.csv")
@@ -48,7 +72,11 @@ telco_df = telco_df.withColumn("TotalCharges",\
     F.when(F.length(F.trim(F.col("TotalCharges"))) == 0, None).\
     otherwise(F.col("TotalCharges").cast('double')))
 
-telco_df.select("customerID", "gender", "SeniorCitizen", "Partner", "Dependents", "Churn").write.format("delta").saveAsTable("churndb.demographic")
+(telco_df.select("customerID", "gender", "SeniorCitizen", "Partner", "Dependents", "Churn")
+         .write
+         .format("delta")
+         .saveAsTable("{}.demographic".format(db_name))
+)
 
 # COMMAND ----------
 
@@ -59,6 +87,7 @@ telco_df.select("customerID", "gender", "SeniorCitizen", "Partner", "Dependents"
 
 # COMMAND ----------
 
+# DBTITLE 1,Compute the Service Features & get Dataframe
 def compute_service_features(data):
   # Count number of optional services enabled, like streaming TV
   @F.pandas_udf('int')
@@ -66,14 +95,17 @@ def compute_service_features(data):
     return sum(map(lambda s: (s == "Yes").astype('int'), cols))
   
   # Below also add AvgPriceIncrease: current monthly charges compared to historical average
-  service_cols = [c for c in data.columns if c not in ["gender", "SeniorCitizen", "Partner", "Dependents", "Churn"]]
+  service_cols = [c for c in data.columns if c not in ["gender", "SeniorCitizen", "Partner", "Dependents", "Churn"]] # i.e. the columns not in Demographics and the Churn label
   return data.select(service_cols).fillna({"TotalCharges": 0.0}).\
-    withColumn("NumOptionalServices",
-        num_optional_services("OnlineSecurity", "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV", "StreamingMovies")).\
-    withColumn("AvgPriceIncrease",
-        F.when(F.col("tenure") > 0, (F.col("MonthlyCharges") - (F.col("TotalCharges") / F.col("tenure")))).otherwise(0.0))
+    withColumn("NumOptionalServices",num_optional_services("OnlineSecurity", "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV", "StreamingMovies")).\
+    withColumn("AvgPriceIncrease",F.when(F.col("tenure") > 0, (F.col("MonthlyCharges") - (F.col("TotalCharges") / F.col("tenure")))).otherwise(0.0))
 
 service_df = compute_service_features(telco_df)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SHOW TABLES IN $db_name
 
 # COMMAND ----------
 
@@ -82,7 +114,7 @@ from databricks.feature_store import FeatureStoreClient
 fs = FeatureStoreClient()
 
 service_features_table = fs.create_table(
-  name='churndb.service_features',
+  name='{}.service_features'.format(db_name),
   primary_keys='customerID',
   schema=service_df.schema,
   description='Telco customer services')
@@ -94,7 +126,7 @@ service_features_table = fs.create_table(
 
 # COMMAND ----------
 
-fs.write_table("churndb.service_features", service_df)
+fs.write_table("{}.service_features".format(db_name), service_df)
 
 # COMMAND ----------
 
@@ -136,7 +168,7 @@ dbutils.notebook.exit("stop")
 
 # COMMAND ----------
 
-display(spark.read.table("churndb.demographic"))
+display(spark.read.table("{}.demographic".format(db_name)))
 
 # COMMAND ----------
 
@@ -145,11 +177,11 @@ display(spark.read.table("churndb.demographic"))
 
 # COMMAND ----------
 
-display(spark.read.table("churndb.demographic").summary())
+display(spark.read.table("{}.demographic".format(db_name)).summary())
 
 # COMMAND ----------
 
-display(spark.read.table("churndb.demographic"))
+display(spark.read.table("{}.demographic".format(db_name)))
 
 # COMMAND ----------
 
@@ -180,12 +212,13 @@ display(spark.read.table("churndb.demographic"))
 
 # COMMAND ----------
 
+# DBTITLE 1,AutoML can do this automatically with "Join Features", but here we create for other purposes
 from databricks.feature_store import FeatureStoreClient, FeatureLookup
 
 fs = FeatureStoreClient()
 
-training_set = fs.create_training_set(spark.read.table("ggw_churndb.demographic"),
-                                      [FeatureLookup(table_name = "ggw_churndb.service_features", lookup_key="customerID")],
+training_set = fs.create_training_set(spark.read.table("{}.demographic".format(db_name)),
+                                      [FeatureLookup(table_name = "{}.service_features".format(db_name), lookup_key="customerID")],
                                       label=None, exclude_columns="customerID")
 
 display(training_set.load_df())
@@ -197,12 +230,16 @@ display(training_set.load_df())
 
 # COMMAND ----------
 
-training_set.load_df().write.format("delta").saveAsTable("ggw_churndb.demographic_service")
+# DBTITLE 1,We do not need to do this (AutoML can joing to Feature Store tables to get this)
+(training_set.load_df().write
+                       .format("delta")
+                       .saveAsTable("{}.demographic_service_training".format(db_name))
+)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Try the above again, this time using the augmented data set in `churndb.demographic_service`.
+# MAGIC Try the AutoML again, this time using the augmented data set in `churndb.demographic_service`.
 # MAGIC 
 # MAGIC This time, let's take a look at the Data Exploration notebook, and the Best Model notebook before proceeding.
 
@@ -225,15 +262,17 @@ import shap
 mlflow.autolog(disable=True)
 
 # be sure to change the following run URI to match the best model generated by AutoML
-model_uri = "runs:/054b7a78d46a4649abb93d9f070460e0/model"
+# model_uri = "runs:/afa354d192504d86be4b6b84253db468/model"
+model_uri = "runs:/93a8b9ea40d046ffaf5d91d627a0af0b/model"
 #model_uri = "runs:/[your run ID here!]/model"
 
-sample = spark.read.table("churndb.demographic_service").sample(0.05, seed=42).toPandas()
+sample = spark.read.table("{}.demographic_service".format(db_name)).sample(0.05, seed=42).toPandas()
 data = sample.drop(["Churn"], axis=1)
 labels = sample["Churn"]
 X_background, X_example, _, y_example = train_test_split(data, labels, train_size=0.25, random_state=42, stratify=labels)
 
-model = mlflow.sklearn.load_model(model_uri)
+# model = mlflow.sklearn.load_model(model_uri)
+model = mlflow.lightgbm.load_model(model_uri)
 
 predict = lambda x: model.predict_proba(pd.DataFrame(x, columns=X_background.columns))[:,-1]
 explainer = KernelExplainer(predict, X_background)
